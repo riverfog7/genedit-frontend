@@ -34,9 +34,9 @@ import requests  # HTTP 클라이언트
 from PIL import Image, ImageQt  # 이미지 변환/처리, Qt 변환
 
 # Qt 관련 (PySide6)
-from PySide6.QtCore import Qt, QRectF, QPointF  # 좌표/사각형 등 기본 타입
-from PySide6.QtGui import QPixmap, QImage, QPen, QColor, QPainter  # 그림 설정 및 페인터
-from PySide6.QtWidgets import (  # 다양한 위젯
+from PyQt6.QtCore import Qt, QRectF, QPointF  # 좌표/사각형 등 기본 타입
+from PyQt6.QtGui import QPixmap, QImage, QPen, QColor, QPainter  # 그림 설정 및 페인터
+from PyQt6.QtWidgets import (  # 다양한 위젯
     QApplication, QWidget, QSplitter, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QLineEdit, QTextEdit, QFileDialog, QGraphicsView, QGraphicsScene,
     QGraphicsPixmapItem, QGraphicsRectItem, QListWidget, QListWidgetItem,
