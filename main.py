@@ -177,6 +177,15 @@ class ImageCanvas(QGraphicsView):  # 이미지와 오버레이(박스/마스크/
                 self.rect_item.setRect(rect)
         super().mouseReleaseEvent(event)
 
+    def current_bbox(self) -> Optional[List[int]]:  # 현재 사용자가 그린 박스를 반환
+        if self.rect_item is None:
+            return None
+        rect = self.rect_item.rect()
+        if rect.width() < 5 or rect.height() < 5:  # 너무 작은 박스는 무시
+            return None
+        return [int(rect.x()), int(rect.y()),
+                int(rect.x() + rect.width()), int(rect.y() + rect.height())]
+
 # ----------------------------- 우측 채팅 패널 ----------------------------------
 class RightChatPanel(QWidget):  # 간단 채팅 UI (백엔드에 채팅 라우트 없으면 안내 문구)
     def __init__(self, parent: Optional[QWidget] = None):  # 생성자
@@ -338,9 +347,18 @@ class LeftEditorPanel(QWidget):  # Detect → Segment → Inpaint 파이프라�
             QMessageBox.warning(self, "경고", "먼저 이미지를 열어주세요.")
             return
         # 우선순위: 체크되었고 선택된 탐지 박스가 있으면 그걸 사용, 아니면 캔버스 드로잉 박스
-        bbox: Optional[BBox] = None
-        if self.chk_use_selected_bbox.isChecked() and self.selected_det_index is not None and 0 <= self.selected_det_index < len(self.detections):
-            bbox = self.detections[self.selected_det_index].box
+        bbox: Optional[List[int]] = None
+        if self.chk_use_selected_bbox.isChecked() and self.selected_det_index is not None:
+            # Flatten detections to match list display
+            all_detections = []
+            if self.detector_output:
+                for det_result in self.detector_output.detections:
+                    for box, score, label in zip(det_result.boxes, det_result.scores, det_result.labels):
+                        all_detections.append((box, score, label))
+
+            if 0 <= self.selected_det_index < len(all_detections):
+                box, _, _ = all_detections[self.selected_det_index]
+                bbox = [int(x) for x in box]
         else:
             bbox = self.canvas.current_bbox()
         # 포인트/라벨 구성 (positive=1, negative=0)
@@ -352,10 +370,20 @@ class LeftEditorPanel(QWidget):  # Detect → Segment → Inpaint 파이프라�
             points.append([x, y]); labels.append(0)
         try:
             self.set_status("segment: 요청 중...")
-            mask_img = call_segment_combined_api(self.image_path, bbox, points if points else None, labels if labels else None)
-            self.last_mask = mask_img
-            self.canvas.set_mask_overlay(mask_img)
-            self.set_status("segment: 완료")
+            result = segmentation_client.segment_combined(
+                self.image_path,
+                points=points if points else None,
+                labels=labels if labels else None,
+                box=bbox
+            )
+            # Extract first mask from ZIP
+            masks = result.extract_masks()
+            if masks:
+                self.last_mask = masks[0]
+                self.canvas.set_mask_overlay(masks[0])
+                self.set_status("segment: 완료")
+            else:
+                raise ValueError("No masks returned")
         except Exception as e:
             QMessageBox.critical(self, "오류", f"세그먼트 실패: {e}")
             self.set_status(f"segment: 오류 - {e}")
