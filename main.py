@@ -13,26 +13,14 @@ GenEdit v2 — 로컬 PySide6 UI (완전 주석 버전)
 from __future__ import annotations  # 미래형 타입힌트 활성화 (Forward reference 등)
 
 # 표준 라이브러리
-import io  # 바이트 스트림 처리용(마스크/이미지 직렬화)
-import json  # 폼의 'data' 필드에 넣을 JSON 직렬화
 import os  # 환경변수 읽기(BACKEND)
 import sys  # 앱 종료, argv 등
 from dataclasses import dataclass  # 단순 데이터 컨테이너 정의용
 from typing import List, Optional, Tuple  # 타입 주석
 
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
-from langchain_core.runnables import RunnableLambda
-from langchain_openai import ChatOpenAI
-from pydantic import BaseModel, Field
-
-from client import DetectionClient, SegmentationClient, ImageGenerationClient
-from client.utils import draw_detections
-
+import dotenv
 # 서드파티 라이브러리
-import requests  # HTTP 클라이언트
 from PIL import Image, ImageQt  # 이미지 변환/처리, Qt 변환
-
 # Qt 관련 (PySide6)
 from PyQt6.QtCore import Qt, QRectF, QPointF  # 좌표/사각형 등 기본 타입
 from PyQt6.QtGui import QPixmap, QImage, QPen, QColor, QPainter  # 그림 설정 및 페인터
@@ -43,9 +31,7 @@ from PyQt6.QtWidgets import (  # 다양한 위젯
     QMessageBox, QCheckBox, QSpinBox
 )
 
-import dotenv
 from client import DetectionClient, ImageGenerationClient, SegmentationClient
-from client.models import DetectorOutput, DetectionResult, SegmentationResult
 
 dotenv.load_dotenv(dotenv_path=dotenv.find_dotenv())
 
@@ -96,7 +82,7 @@ class ImageCanvas(QGraphicsView):  # 이미지와 오버레이(박스/마스크/
         self.pixmap_item = QGraphicsPixmapItem(pix)  # 픽스맵 아이템 생성
         self.scene.addItem(self.pixmap_item)  # 장면에 추가
         self.setSceneRect(QRectF(0, 0, pix.width(), pix.height()))  # 스크롤/뷰 경계 설정
-        self.fitInView(self.scene.itemsBoundingRect(), Qt.KeepAspectRatio)  # 보기 영역 맞춤
+        self.fitInView(self.scene.itemsBoundingRect(), Qt.AspectRatioMode.KeepAspectRatio)  # 보기 영역 맞춤
         self.rect_item = None  # 드래그 사각형 초기화
         self.clear_detections()  # 탐지 박스 초기화
         self.clear_points()  # 포인트 초기화
@@ -126,7 +112,7 @@ class ImageCanvas(QGraphicsView):  # 이미지와 오버레이(박스/마스크/
         for det in dets:  # 모든 박스에 파란 실선 오버레이
             rect = QRectF(det.box.x1, det.box.y1, det.box.x2 - det.box.x1, det.box.y2 - det.box.y1)
             item = QGraphicsRectItem(rect)
-            item.setPen(QPen(QColor(0, 120, 255), 2, Qt.SolidLine))
+            item.setPen(QPen(QColor(0, 120, 255), 2, Qt.PenStyle.SolidLine))
             item.setZValue(10)
             self.scene.addItem(item)
             self.overlay_items.append(item)
@@ -134,7 +120,7 @@ class ImageCanvas(QGraphicsView):  # 이미지와 오버레이(박스/마스크/
             b = dets[select_index].box
             rect = QRectF(b.x1, b.y1, b.x2 - b.x1, b.y2 - b.y1)
             sel = QGraphicsRectItem(rect)
-            sel.setPen(QPen(QColor(255, 210, 0), 3, Qt.DashLine))
+            sel.setPen(QPen(QColor(255, 210, 0), 3, Qt.PenStyle.DashLine))
             sel.setZValue(11)
             self.scene.addItem(sel)
             self.selected_box_item = sel
@@ -154,10 +140,10 @@ class ImageCanvas(QGraphicsView):  # 이미지와 오버레이(박스/마스크/
             self.mask_pixmap_item.setPixmap(pix)
 
     def mousePressEvent(self, event):  # 마우스 눌림 이벤트
-        if event.button() == Qt.LeftButton and self.pixmap_item is not None:
+        if event.button() == Qt.MouseButton.LeftButton and self.pixmap_item is not None:
             modifiers = event.modifiers()  # 수정키 상태
             scene_pos = self.mapToScene(event.pos())  # 클릭 위치(씬 좌표)
-            if modifiers & Qt.AltModifier:  # Alt+좌클릭 → 음성 포인트
+            if modifiers & Qt.KeyboardModifier.AltModifier:  # Alt+좌클릭 → 음성 포인트
                 self.neg_points.append((int(scene_pos.x()), int(scene_pos.y())))
                 # 음성 포인트 클릭일 땐 사각형 드로잉은 시작하지 않도록 즉시 반환
                 super().mousePressEvent(event)
@@ -169,7 +155,7 @@ class ImageCanvas(QGraphicsView):  # 이미지와 오버레이(박스/마스크/
                 if self.rect_item is None:
                     self.rect_item = QGraphicsRectItem()
                     self.rect_item.setZValue(12)
-                    self.rect_item.setPen(QPen(QColor(255, 0, 0), 2, Qt.DashLine))
+                    self.rect_item.setPen(QPen(QColor(255, 0, 0), 2, Qt.PenStyle.DashLine))
                     self.scene.addItem(self.rect_item)
         super().mousePressEvent(event)
 
@@ -181,7 +167,7 @@ class ImageCanvas(QGraphicsView):  # 이미지와 오버레이(박스/마스크/
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):  # 마우스 떼기(드래그 종료)
-        if event.button() == Qt.LeftButton and self.drawing:
+        if event.button() == Qt.MouseButton.LeftButton and self.drawing:
             self.drawing = False
             self.rect_end = self.mapToScene(event.pos())
             if self.rect_item is not None:
