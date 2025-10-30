@@ -43,20 +43,20 @@ from PyQt6.QtWidgets import (  # 다양한 위젯
     QMessageBox, QCheckBox, QSpinBox
 )
 
-# ----------------------------- 엔드포인트 설정 --------------------------------
-BACKEND = os.environ.get("BACKEND", "http://localhost:8000")  # 기본값은 8000; 필요시 환경변수로 변경
-EP_HEALTH = f"{BACKEND}/health"  # 헬스체크
-EP_DETECT = f"{BACKEND}/detect"  # 객체 탐지
-EP_SEG_POINT = f"{BACKEND}/segment/point"  # 포인트 세그먼트
-EP_SEG_BOX = f"{BACKEND}/segment/box"  # 박스 세그먼트
-EP_SEG_COMBINED = f"{BACKEND}/segment/combined"  # 결합 세그먼트
-EP_INPAINT = f"{BACKEND}/generate/inpaint"  # 인페인트(이미지 수정)
-EP_GENERATE = f"{BACKEND}/generate/generate"  # 텍스트→이미지 생성(선택)
-EP_CHAT = f"{BACKEND}/v1/chat/completions"  # (레포에 없을 수 있음) 채팅 라우트
-CHAT_OPENAI_COMPAT = False  # 현재 백엔드에 채팅 라우트가 없으므로 False 유지
-OPENAI_MODEL_NAME = "model"  # 채팅 사용시 모델명(참고용)
+import dotenv
+from client import DetectionClient, ImageGenerationClient, SegmentationClient
+from client.models import DetectorOutput, DetectionResult, SegmentationResult
 
-# ----------------------------- 데이터 모델 -------------------------------------
+dotenv.load_dotenv(dotenv_path=dotenv.find_dotenv())
+
+BASE_URL=os.getenv("BACKEND_BASE_URL")
+VLLM_BASE_URL=os.path.join(BASE_URL, "vllm/v1")
+IMAGE_BASE_URL=os.path.join(BASE_URL, "image")
+
+detection_client = DetectionClient(IMAGE_BASE_URL)
+segmentation_client = SegmentationClient(IMAGE_BASE_URL)
+generation_client = ImageGenerationClient(IMAGE_BASE_URL)
+
 @dataclass
 class BBox:  # 바운딩 박스 좌표 컨테이너
     x1: int  # 좌상단 x
@@ -66,20 +66,14 @@ class BBox:  # 바운딩 박스 좌표 컨테이너
     def to_list(self) -> List[int]:  # API 전송용 리스트 변환
         return [int(self.x1), int(self.y1), int(self.x2), int(self.y2)]
 
-@dataclass
-class Detection:  # 탐지 결과 항목
-    box: BBox      # 박스
-    score: float   # 신뢰도
-    label: str     # 어떤 텍스트 프롬프트에 해당하는지
-
 # ----------------------------- 캔버스 뷰 ---------------------------------------
 class ImageCanvas(QGraphicsView):  # 이미지와 오버레이(박스/마스크/포인트)를 그리는 뷰
     def __init__(self, parent: Optional[QWidget] = None):  # 생성자
         super().__init__(parent)  # 부모 초기화
         # 안티앨리어싱 및 픽스맵 스무딩 렌더 힌트 설정 (QPainter 사용)
-        self.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
-        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)  # 줌 기준점
-        self.setDragMode(QGraphicsView.ScrollHandDrag)  # 드래그로 이동
+        self.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)  # 줌 기준점
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)  # 드래그로 이동
         self.scene = QGraphicsScene(self)  # 장면(Scene) 생성
         self.setScene(self.scene)  # 뷰에 장면 연결
         self.pixmap_item: Optional[QGraphicsPixmapItem] = None  # 원본 이미지 아이템
@@ -412,128 +406,6 @@ class LeftEditorPanel(QWidget):  # Detect → Segment → Inpaint 파이프라�
             QMessageBox.critical(self, "오류", f"인페인트 실패: {e}")
             self.set_status(f"inpaint: 오류 - {e}")
 
-# ----------------------------- HTTP 헬퍼 ----------------------------------------
-
-def parse_image_bytes_resp(resp: requests.Response) -> Image.Image:  # 이미지 바이트 응답을 PIL 이미지로 변환
-    ctype = resp.headers.get("Content-Type", "")
-    if "image" in ctype or resp.content:  # 이미지 응답이면
-        try:
-            return Image.open(io.BytesIO(resp.content)).convert("RGBA")
-        except Exception as e:
-            raise RuntimeError(f"이미지 디코드 실패: {e}")
-    raise RuntimeError(f"알 수 없는 응답 형식(Content-Type={ctype})")
-
-
-def call_detect_api(image_path: str, texts: List[str], threshold: float) -> List[Detection]:  # 객체 탐지 API 호출
-    # 파일은 with 블록으로 열어 자동으로 닫히게 함
-    with open(image_path, "rb") as f:
-        files = {"image": f}  # 파일 필드명은 백엔드 스키마에 맞춤
-        payload = {"text": texts, "threshold": threshold}  # 백엔드가 기대하는 구조
-        data = {"data": json.dumps(payload)}  # multipart form 의 'data' 키에 JSON 문자열
-        r = requests.post(EP_DETECT, files=files, data=data, timeout=300)
-    if r.status_code != 200:
-        raise RuntimeError(f"{r.status_code} {r.text[:200]}")
-    try:
-        js = r.json()  # JSON 파싱
-        detections = js.get("detections", [])  # DetectorOutput.detections
-        out: List[Detection] = []
-        for det_block in detections:  # 각 블록은 boxes/scores/labels 를 가짐
-            boxes = det_block.get("boxes", [])
-            scores = det_block.get("scores", [])
-            labels = det_block.get("labels", [])
-            for b, s, lb in zip(boxes, scores, labels):  # 동일 길이 가정
-                bb = BBox(int(b[0]), int(b[1]), int(b[2]), int(b[3]))
-                out.append(Detection(bb, str(lb), float(s)))
-        return out
-    except Exception as e:
-        raise RuntimeError(f"detect 응답 파싱 실패: {e}")
-
-
-def call_segment_combined_api(image_path: str, bbox: Optional[BBox], points: Optional[List[List[int]]], labels: Optional[List[int]]) -> Image.Image:
-    # 결합형 세그먼트 호출 (box/points 둘 다 또는 일부만)
-    with open(image_path, "rb") as f:
-        files = {"image": f}
-        payload = {}
-        if bbox is not None:
-            # 서버가 'box' 키를 기대한다고 가정. 만약 'boxes'를 기대한다면 아래 한 줄을 교체:
-            # payload["boxes"] = bbox.to_list()
-            payload["box"] = bbox.to_list()
-        if points is not None:
-            payload["points"] = points
-        if labels is not None:
-            payload["labels"] = labels
-        data = {"data": json.dumps(payload)}
-        r = requests.post(EP_SEG_COMBINED, files=files, data=data, timeout=600)
-    if r.status_code != 200:
-        raise RuntimeError(f"{r.status_code} {r.text[:200]}")
-    ctype = r.headers.get("Content-Type", "")
-    # 서버가 ZIP(application/zip)으로 마스크/메타데이터를 반환하는 경우 지원
-    if "application/zip" in ctype or r.content[:2] == b"PK":
-        import zipfile
-        buf = io.BytesIO(r.content)
-        with zipfile.ZipFile(buf) as zf:
-            png_names = [n for n in zf.namelist() if n.lower().endswith('.png')]
-            if not png_names:
-                raise RuntimeError("ZIP 응답에 PNG 마스크가 없습니다")
-            raw = zf.read(png_names[0])
-            return Image.open(io.BytesIO(raw)).convert("RGBA")
-    # ZIP 이 아니면 일반 이미지로 파싱 시도
-    return parse_image_bytes_resp(r)
-
-
-def call_inpaint_api(
-    control_image_path: str,
-    control_mask_image: Image.Image,
-    prompt: str,
-    num_inference_steps: int = 30,
-    true_cfg_scale: float = 4.0,
-    negative_prompt: str = "",
-    controlnet_conditioning_scale: float = 1.0,
-    seed: Optional[int] = None,
-) -> Image.Image:
-    # 마스크 이미지를 PNG 바이트로 직렬화
-    mask_buf = io.BytesIO(); control_mask_image.save(mask_buf, format="PNG"); mask_buf.seek(0)
-    with open(control_image_path, "rb") as f:
-        files = {
-            "control_image": f,  # 원본 이미지 파일
-            "control_mask": ("mask.png", mask_buf, "image/png"),  # (파일명, 바이트, MIME)
-        }
-        payload = {
-            "prompt": prompt,
-            "negative_prompt": negative_prompt,
-            "num_inference_steps": num_inference_steps,
-            "true_cfg_scale": true_cfg_scale,
-            "controlnet_conditioning_scale": controlnet_conditioning_scale,
-        }
-        if seed is not None:
-            payload["seed"] = int(seed)
-        data = {"data": json.dumps(payload)}
-        r = requests.post(EP_INPAINT, files=files, data=data, timeout=1200)
-    if r.status_code != 200:
-        raise RuntimeError(f"{r.status_code} {r.text[:200]}")
-    return parse_image_bytes_resp(r)
-
-
-def send_chat_message(user_text: str) -> str:
-    if not CHAT_OPENAI_COMPAT:
-        return "(chat not available on this backend)"  # 미지원 시 안내
-    payload = {
-        "model": OPENAI_MODEL_NAME,
-        "messages": [
-            {"role": "system", "content": "You are a helpful assistant for image editing."},
-            {"role": "user", "content": user_text},
-        ],
-        "temperature": 0.2,
-    }
-    r = requests.post(EP_CHAT, json=payload, timeout=120)
-    if r.status_code != 200:
-        raise RuntimeError(f"{r.status_code} {r.text[:200]}")
-    js = r.json()
-    try:
-        return js["choices"][0]["message"]["content"]
-    except Exception:
-        return str(js)[:800]
-
 # ----------------------------- 메인 윈도우 --------------------------------------
 class MainWindow(QWidget):  # 메인 프레임(좌: 에디터, 우: 채팅)
     def __init__(self):
@@ -541,7 +413,7 @@ class MainWindow(QWidget):  # 메인 프레임(좌: 에디터, 우: 채팅)
         self.setWindowTitle("GenEdit v2 — 완전 주석 클라이언트")
         self.resize(1400, 900)
 
-        splitter = QSplitter(Qt.Horizontal)  # 좌/우 분할기
+        splitter = QSplitter(Qt.Orientation.Horizontal)  # 좌/우 분할기
         self.left = LeftEditorPanel(); self.right = RightChatPanel()
         splitter.addWidget(self.left); splitter.addWidget(self.right)
         splitter.setSizes([1000, 400])  # 초기 너비 비율
@@ -558,8 +430,10 @@ class MainWindow(QWidget):  # 메인 프레임(좌: 에디터, 우: 채팅)
 
     def check_health(self):  # /health 호출하여 상태 갱신
         try:
-            r = requests.get(EP_HEALTH, timeout=5)
-            self.lbl_health.setText(f"health: {r.status_code} {r.text[:60]}")
+            h1 = generation_client.health_check()
+            h2 = detection_client.health_check()
+            h3 = segmentation_client.health_check()
+            self.lbl_health.setText(f"health: gen={h1.get('status')} detect={h2.get('status')} segment={h3.get('status')}")
         except Exception as e:
             self.lbl_health.setText(f"health error: {e}")
 
