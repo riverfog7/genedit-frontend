@@ -11,7 +11,7 @@ from .utils import process_image, print_and_raise_for_status
 
 class DetectionClient:
     def __init__(self, base_url: str = "http://localhost:8000"):
-        self.base_url = os.path.join(base_url, 'detect')
+        self.base_url = f"{base_url.rstrip('/')}/detect"
         self.session = requests.Session()
 
     def detect(
@@ -28,6 +28,6 @@ class DetectionClient:
         return DetectorOutput(**response.json())
 
     def health_check(self) -> dict:
-        response = self.session.get(os.path.join(self.base_url, 'health'))
+        response = self.session.get(f"{self.base_url}/health")
         print_and_raise_for_status(response)
         return response.json()

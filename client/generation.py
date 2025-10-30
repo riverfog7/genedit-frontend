@@ -12,7 +12,7 @@ from .utils import process_image, print_and_raise_for_status
 
 class ImageGenerationClient:
     def __init__(self, base_url: str = "http://localhost:8000"):
-        self.base_url = os.path.join(base_url, 'generate')
+        self.base_url = f"{base_url.rstrip('/')}/generate"
         self.session = requests.Session()
 
     def generate(
@@ -36,7 +36,7 @@ class ImageGenerationClient:
         )
 
         data = {"data": request.model_dump_json()}
-        response = self.session.post(os.path.join(self.base_url, 'generate'), data=data)
+        response = self.session.post(f"{self.base_url}/generate", data=data)
         print_and_raise_for_status(response)
 
         return Image.open(io.BytesIO(response.content))
@@ -67,7 +67,7 @@ class ImageGenerationClient:
         }
         data = {"data": request.model_dump_json()}
 
-        response = self.session.post(os.path.join(self.base_url, 'inpaint'), files=files, data=data)
+        response = self.session.post(f"{self.base_url}/inpaint", files=files, data=data)
         print_and_raise_for_status(response)
 
         return Image.open(io.BytesIO(response.content))

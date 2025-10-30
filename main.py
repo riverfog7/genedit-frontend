@@ -36,8 +36,8 @@ from client import DetectionClient, ImageGenerationClient, SegmentationClient, D
 dotenv.load_dotenv(dotenv_path=dotenv.find_dotenv())
 
 BASE_URL=os.getenv("BACKEND_BASE_URL")
-VLLM_BASE_URL=os.path.join(BASE_URL, "vllm/v1")
-IMAGE_BASE_URL=os.path.join(BASE_URL, "image")
+VLLM_BASE_URL=f"{BASE_URL.rstrip('/')}/vllm"
+IMAGE_BASE_URL=f"{BASE_URL.rstrip('/')}/image"
 
 detection_client = DetectionClient(IMAGE_BASE_URL)
 segmentation_client = SegmentationClient(IMAGE_BASE_URL)

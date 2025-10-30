@@ -11,7 +11,7 @@ from .utils import process_image, print_and_raise_for_status
 
 class SegmentationClient:
     def __init__(self, base_url: str = "http://localhost:8000"):
-        self.base_url = os.path.join(base_url, "segment")
+        self.base_url = f"{base_url.rstrip('/')}/segment"
         self.session = requests.Session()
 
     def segment_point(
@@ -23,7 +23,7 @@ class SegmentationClient:
         request = PointSegmentRequest(points=points, labels=labels)
         files = {"image": process_image(image)}
         data = {"data": request.model_dump_json()}
-        response = self.session.post(os.path.join(self.base_url, "point"), files=files, data=data)
+        response = self.session.post(f"{self.base_url}/point", files=files, data=data)
         print_and_raise_for_status(response)
         return SegmentationResult(response.content)
 
@@ -35,7 +35,7 @@ class SegmentationClient:
         request = BoxSegmentRequest(box=box)
         files = {"image": process_image(image)}
         data = {"data": request.model_dump_json()}
-        response = self.session.post(os.path.join(self.base_url, "box"), files=files, data=data)
+        response = self.session.post(f"{self.base_url}/box", files=files, data=data)
         print_and_raise_for_status(response)
         return SegmentationResult(response.content)
 
@@ -49,11 +49,11 @@ class SegmentationClient:
         request = CombinedSegmentRequest(points=points, labels=labels, box=box)
         files = {"image": process_image(image)}
         data = {"data": request.model_dump_json()}
-        response = self.session.post(os.path.join(self.base_url, "combined"), files=files, data=data)
+        response = self.session.post(f"{self.base_url}/combined", files=files, data=data)
         print_and_raise_for_status(response)
         return SegmentationResult(response.content)
 
     def health_check(self) -> dict:
-        response = self.session.get(os.path.join(self.base_url, "health"))
+        response = self.session.get(f"{self.base_url}/health")
         print_and_raise_for_status(response)
         return response.json()
