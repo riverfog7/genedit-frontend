@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (  # 다양한 위젯
     QMessageBox, QCheckBox, QSpinBox
 )
 
-from client import DetectionClient, ImageGenerationClient, SegmentationClient
+from client import DetectionClient, ImageGenerationClient, SegmentationClient, DetectorOutput
 
 dotenv.load_dotenv(dotenv_path=dotenv.find_dotenv())
 
@@ -42,15 +42,6 @@ IMAGE_BASE_URL=os.path.join(BASE_URL, "image")
 detection_client = DetectionClient(IMAGE_BASE_URL)
 segmentation_client = SegmentationClient(IMAGE_BASE_URL)
 generation_client = ImageGenerationClient(IMAGE_BASE_URL)
-
-@dataclass
-class BBox:  # 바운딩 박스 좌표 컨테이너
-    x1: int  # 좌상단 x
-    y1: int  # 좌상단 y
-    x2: int  # 우하단 x
-    y2: int  # 우하단 y
-    def to_list(self) -> List[int]:  # API 전송용 리스트 변환
-        return [int(self.x1), int(self.y1), int(self.x2), int(self.y2)]
 
 # ----------------------------- 캔버스 뷰 ---------------------------------------
 class ImageCanvas(QGraphicsView):  # 이미지와 오버레이(박스/마스크/포인트)를 그리는 뷰
@@ -105,20 +96,31 @@ class ImageCanvas(QGraphicsView):  # 이미지와 오버레이(박스/마스크/
             self.scene.removeItem(self.mask_pixmap_item)
             self.mask_pixmap_item = None
 
-    def draw_detections(self, dets: List[Detection], select_index: Optional[int] = None) -> None:  # 탐지 결과 그리기
+    def draw_detections(self, detector_output: DetectorOutput, select_index: Optional[int] = None) -> None:  # 탐지 결과 그리기
         self.clear_detections()
         if self.image is None:
             return
-        for det in dets:  # 모든 박스에 파란 실선 오버레이
-            rect = QRectF(det.box.x1, det.box.y1, det.box.x2 - det.box.x1, det.box.y2 - det.box.y1)
+        # Flatten all detections into a list of (box, score, label) tuples
+        all_detections = []
+        for det_result in detector_output.detections:
+            for box, score, label in zip(det_result.boxes, det_result.scores, det_result.labels):
+                all_detections.append((box, score, label))
+
+        # Draw all boxes with blue solid lines
+        for box, score, label in all_detections:
+            x1, y1, x2, y2 = box
+            rect = QRectF(x1, y1, x2 - x1, y2 - y1)
             item = QGraphicsRectItem(rect)
             item.setPen(QPen(QColor(0, 120, 255), 2, Qt.PenStyle.SolidLine))
             item.setZValue(10)
             self.scene.addItem(item)
             self.overlay_items.append(item)
-        if select_index is not None and 0 <= select_index < len(dets):  # 선택 박스는 노랑 점선
-            b = dets[select_index].box
-            rect = QRectF(b.x1, b.y1, b.x2 - b.x1, b.y2 - b.y1)
+
+        # Draw selected box with yellow dashed line
+        if select_index is not None and 0 <= select_index < len(all_detections):
+            box, score, label = all_detections[select_index]
+            x1, y1, x2, y2 = box
+            rect = QRectF(x1, y1, x2 - x1, y2 - y1)
             sel = QGraphicsRectItem(rect)
             sel.setPen(QPen(QColor(255, 210, 0), 3, Qt.PenStyle.DashLine))
             sel.setZValue(11)
@@ -175,19 +177,6 @@ class ImageCanvas(QGraphicsView):  # 이미지와 오버레이(박스/마스크/
                 self.rect_item.setRect(rect)
         super().mouseReleaseEvent(event)
 
-    def current_bbox(self) -> Optional[BBox]:  # 현재 드래그 사각형을 BBox로 반환
-        if self.rect_item is None or self.image is None:
-            return None
-        rect: QRectF = self.rect_item.rect()
-        # 이미지 경계 안으로 좌표 클램프
-        x1 = max(0, min(int(rect.left()),   self.image.width  - 1))
-        y1 = max(0, min(int(rect.top()),    self.image.height - 1))
-        x2 = max(0, min(int(rect.right()),  self.image.width  - 1))
-        y2 = max(0, min(int(rect.bottom()), self.image.height - 1))
-        if x2 <= x1 or y2 <= y1:  # 잘못된 사각형이면 None
-            return None
-        return BBox(x1, y1, x2, y2)
-
 # ----------------------------- 우측 채팅 패널 ----------------------------------
 class RightChatPanel(QWidget):  # 간단 채팅 UI (백엔드에 채팅 라우트 없으면 안내 문구)
     def __init__(self, parent: Optional[QWidget] = None):  # 생성자
@@ -209,10 +198,7 @@ class RightChatPanel(QWidget):  # 간단 채팅 UI (백엔드에 채팅 라우�
             return
         self.append("You", txt)
         self.input.clear()
-        try:
-            reply = send_chat_message(txt)
-        except Exception as e:
-            reply = f"(error) {e}"
+        reply = "채팅 기능은 아직 구현되지 않았습니다. vLLM 엔드포인트가 필요합니다."
         self.append("Assistant", reply)
 
 # ----------------------------- 좌측 에디터 패널 --------------------------------
@@ -266,7 +252,7 @@ class LeftEditorPanel(QWidget):  # Detect → Segment → Inpaint 파이프라�
 
         # 상태 변수들
         self.image_path: Optional[str] = None
-        self.detections: List[Detection] = []
+        self.detector_output: Optional[DetectorOutput] = None
         self.selected_det_index: Optional[int] = None
         self.last_mask: Optional[Image.Image] = None
         self.last_result: Optional[Image.Image] = None
@@ -289,7 +275,7 @@ class LeftEditorPanel(QWidget):  # Detect → Segment → Inpaint 파이프라�
             return
         self.image_path = path
         self.canvas.load_image(path)
-        self.detections = []
+        self.detector_output = None
         self.list_detect.clear()
         self.selected_det_index = None
         self.canvas.clear_mask_overlay(); self.last_mask = None; self.last_result = None
@@ -319,20 +305,29 @@ class LeftEditorPanel(QWidget):  # Detect → Segment → Inpaint 파이프라�
         thr = self.spn_thresh.value() / 100.0
         try:
             self.set_status("detect: 요청 중...")
-            dets = call_detect_api(self.image_path, labels, thr)
-            self.detections = dets
+            detector_output = detection_client.detect(self.image_path, labels, thr)
+            self.detector_output = detector_output
             self.list_detect.clear()
-            for d in dets:
-                self.list_detect.addItem(QListWidgetItem(f"{d.label}  score={d.score:.2f}  box=({d.box.x1},{d.box.y1},{d.box.x2},{d.box.y2})"))
-            self.canvas.draw_detections(dets, None)
-            self.set_status(f"detect: {len(dets)}개")
+
+            # Flatten all detections for display
+            for det_result in detector_output.detections:
+                for box, score, label in zip(det_result.boxes, det_result.scores, det_result.labels):
+                    x1, y1, x2, y2 = box
+                    self.list_detect.addItem(QListWidgetItem(f"{label}  score={score:.2f}  box=({int(x1)},{int(y1)},{int(x2)},{int(y2)})"))
+
+            self.canvas.draw_detections(detector_output, None)
+
+            # Count total detections
+            total_count = sum(len(det_result.boxes) for det_result in detector_output.detections)
+            self.set_status(f"detect: {total_count}개")
         except Exception as e:
             QMessageBox.critical(self, "오류", f"탐지 실패: {e}")
             self.set_status(f"detect: 오류 - {e}")
 
     def on_select_detection(self, row: int) -> None:  # 리스트 선택 변경 시 강조표시 갱신
         self.selected_det_index = row if row >= 0 else None
-        self.canvas.draw_detections(self.detections, self.selected_det_index)
+        if self.detector_output:
+            self.canvas.draw_detections(self.detector_output, self.selected_det_index)
 
     def on_clear_points(self) -> None:  # 포인트 초기화 버튼
         self.canvas.clear_points()
@@ -373,15 +368,15 @@ class LeftEditorPanel(QWidget):  # Detect → Segment → Inpaint 파이프라�
         steps = int(self.spn_steps.value())
         try:
             self.set_status("inpaint: 요청 중... (시간 소요)")
-            result_img = call_inpaint_api(
-                control_image_path=self.image_path,
-                control_mask_image=self.last_mask,
+            result_img = generation_client.inpaint(
+                control_image=self.image_path,
+                control_mask=self.last_mask,
                 prompt=prompt,
+                negative_prompt="",
                 num_inference_steps=steps,
                 true_cfg_scale=4.0,
-                negative_prompt="",
                 controlnet_conditioning_scale=1.0,
-                seed=None,
+                seed=None
             )
             self.last_result = result_img
             # 결과를 즉시 오버레이로 보여줌 (원본 위에 결과가 보이도록)
@@ -429,5 +424,3 @@ if __name__ == "__main__":  # 스크립트 직접 실행 시
     w = MainWindow()  # 메인 윈도우 생성
     w.show()  # 창 띄우기
     sys.exit(app.exec())  # 이벤트 루프 시작 및 종료 코드 반환
-
-
